@@ -2,51 +2,78 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. KONFIGURASI HALAMAN ---
-st.set_page_config(
-    page_title="DompetKu - Aplikasi Keuangan",
-    page_icon="💸",
-    layout="wide"
-)
+st.set_page_config(page_title="DompetKu - Cloud", page_icon="💸", layout="wide")
 
-# --- KONFIGURASI SALDO AWAL ---
-SALDO_AWAL_FIXED = 4341114 
+# --- KONFIGURASI SALDO & GOOGLE SHEET ---
+SALDO_AWAL_FIXED = 4341114  # Ganti sesuai saldo real Anda
+NAMA_GOOGLE_SHEET = "Database_Keuangan" # Pastikan nama file di GSheet SAMA PERSIS
 
-# --- 2. INISIALISASI DATABASE ---
-if 'data_transaksi' not in st.session_state:
-    st.session_state['data_transaksi'] = []
+# --- 2. KONEKSI KE GOOGLE SHEET ---
+# Fungsi ini menggunakan cache agar tidak loading ulang terus menerus
+@st.cache_resource
+def init_connection():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    
+    # Mendeteksi Secrets dari Streamlit Cloud atau Local
+    if "gcp_service_account" in st.secrets:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        # Fallback jika dijalankan manual tanpa secrets (Opsional, tapi lebih baik pakai Secrets)
+        st.error("Credential Google belum ditemukan di Secrets!")
+        st.stop()
+        
+    client = gspread.authorize(creds)
+    return client
+
+# Fungsi ambil data
+def get_data():
+    client = init_connection()
+    try:
+        sheet = client.open(NAMA_GOOGLE_SHEET).sheet1
+        data = sheet.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error koneksi Google Sheet: {e}")
+        return pd.DataFrame()
+
+# Fungsi simpan data
+def save_data(row_data):
+    client = init_connection()
+    sheet = client.open(NAMA_GOOGLE_SHEET).sheet1
+    sheet.append_row(row_data)
 
 # --- 3. FUNGSI HELPER ---
 def format_rupiah(angka):
     return f"Rp {angka:,.0f}".replace(",", ".")
 
-# --- 4. DATA PRE-PROCESSING ---
-df = pd.DataFrame(st.session_state['data_transaksi'])
-if not df.empty:
-    # Konversi ke datetime, handle error jika format salah
-    df['Tanggal'] = pd.to_datetime(df['Tanggal'], errors='coerce')
+# --- 4. LOAD DATA DARI INTERNET ---
+df = get_data()
 
-# --- 5. SIDEBAR (MENU KIRI) ---
+# Pre-processing Tanggal
+if not df.empty:
+    # Mengatasi format tanggal yang mungkin tercampur di GSheet
+    df['Tanggal'] = pd.to_datetime(df['Tanggal'], errors='coerce')
+    df['Nominal'] = pd.to_numeric(df['Nominal'], errors='coerce')
+
+# --- 5. SIDEBAR ---
 with st.sidebar:
     st.header("🎛️ Pusat Kontrol")
-    
-    # Logic Tahun agar tidak error jika data kosong
-    if not df.empty and df['Tanggal'].notna().any():
+    if not df.empty:
         list_tahun = sorted(df['Tanggal'].dt.year.dropna().unique(), reverse=True)
+        list_tahun = [int(x) for x in list_tahun]
         current_year = datetime.now().year
         if current_year not in list_tahun:
             list_tahun.insert(0, current_year)
     else:
         list_tahun = [datetime.now().year]
 
-    # Pastikan list_tahun bersih dari nilai float/NaN
-    list_tahun = [int(x) for x in list_tahun]
-    
-    selected_year = st.selectbox("Pilih Tahun Rekap:", list_tahun)
-    
-    st.info(f"Tahun: **{selected_year}**")
-    st.write("© 2025 DompetKu App")
+    selected_year = st.selectbox("Pilih Tahun:", list_tahun)
+    st.write("© 2025 DompetKu Cloud")
 
 # Filter Data
 if not df.empty:
@@ -54,12 +81,11 @@ if not df.empty:
 else:
     df_filtered = df
 
-# --- 6. HEADER ---
-st.title(f"💸 Laporan Keuangan {selected_year}")
-st.markdown("Aplikasi Pencatat Keuangan Pribadi (Web Version)")
+# --- 6. MAIN DASHBOARD ---
+st.title(f"💸 Keuangan Online {selected_year}")
+st.caption(f"Terhubung ke Google Sheet: {NAMA_GOOGLE_SHEET}")
 
-# --- 7. TABS MENU ---
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "➕ Input", "📝 Tabel"])
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "➕ Input Cloud", "📝 Tabel Data"])
 
 # === TAB 1: DASHBOARD ===
 with tab1:
@@ -83,51 +109,50 @@ with tab1:
                 delta_color="normal" if kenaikan >= 0 else "inverse")
 
     st.markdown("---")
-
+    
     if not df_filtered.empty:
-        # Chart 1: Pie
-        pie_data = pd.DataFrame({
-            "Tipe": ["Pemasukan", "Pengeluaran"],
-            "Total": [total_pemasukan, total_pengeluaran]
-        })
-        fig_pie = px.pie(pie_data, values='Total', names='Tipe', 
-                            color='Tipe', color_discrete_map={'Pemasukan':'#00CC96', 'Pengeluaran':'#EF553B'},
-                            hole=0.4)
-        st.plotly_chart(fig_pie, use_container_width=True)
-    else:
-        st.info("Belum ada transaksi tambahan.")
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            fig_pie = px.pie(df_filtered, values='Nominal', names='Tipe', title="Komposisi", 
+                             color='Tipe', color_discrete_map={'Pemasukan':'#00CC96', 'Pengeluaran':'#EF553B'})
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with col_c2:
+            daily = df_filtered.groupby(['Tanggal', 'Tipe'])['Nominal'].sum().reset_index()
+            fig_bar = px.bar(daily, x='Tanggal', y='Nominal', color='Tipe', title="Tren Harian",
+                             color_discrete_map={'Pemasukan':'#00CC96', 'Pengeluaran':'#EF553B'})
+            st.plotly_chart(fig_bar, use_container_width=True)
 
-# === TAB 2: INPUT TRANSAKSI ===
+# === TAB 2: INPUT ===
 with tab2:
-    st.subheader("Tambah Transaksi")
+    st.subheader("Input ke Google Sheet")
     with st.form("form_transaksi", clear_on_submit=True):
         col_in1, col_in2 = st.columns(2)
         with col_in1:
             tanggal_input = st.date_input("Tanggal", datetime.now())
-            tipe_input = st.selectbox("Jenis", ["Pemasukan", "Pengeluaran"])
-            nominal_input = st.number_input("Nominal (Rp)", min_value=0, step=5000)
+            tipe_input = st.selectbox("Tipe", ["Pemasukan", "Pengeluaran"])
+            nominal_input = st.number_input("Nominal (Rp)", min_value=0, step=10000)
         with col_in2:
-            kategori_input = st.text_input("Kategori", placeholder="Misal: Makan")
+            kategori_input = st.text_input("Kategori")
             catatan_input = st.text_input("Catatan")
         
-        simpan = st.form_submit_button("Simpan", use_container_width=True)
+        submitted = st.form_submit_button("Kirim ke Database 🚀", use_container_width=True)
 
-        if simpan:
+        if submitted:
             if nominal_input > 0 and kategori_input:
-                new_data = {
-                    "Tanggal": pd.Timestamp(tanggal_input),
-                    "Tipe": tipe_input,
-                    "Kategori": kategori_input,
-                    "Nominal": nominal_input,
-                    "Catatan": catatan_input
-                }
-                st.session_state['data_transaksi'].append(new_data)
-                st.success("Tersimpan!")
-                st.rerun()
+                with st.spinner("Menyimpan ke Google Sheet..."):
+                    # Format data list untuk dikirim ke GSheet
+                    # Tanggal diubah jadi string biar GSheet tidak bingung
+                    tgl_str = tanggal_input.strftime("%Y-%m-%d")
+                    
+                    data_baru = [tgl_str, tipe_input, kategori_input, nominal_input, catatan_input]
+                    save_data(data_baru)
+                    
+                    st.success("Data berhasil masuk Cloud! Refreshing...")
+                    st.rerun()
             else:
                 st.error("Nominal & Kategori wajib diisi.")
 
-# === TAB 3: TABEL DATA ===
+# === TAB 3: TABEL ===
 with tab3:
     if not df_filtered.empty:
         tabel_show = df_filtered.copy()
